@@ -105,6 +105,10 @@ def flatten_email_accounts(accounts: list[dict]) -> pd.DataFrame:
 
     df = pd.json_normalize(accounts, sep=".")
 
+    # Normalize emails for matching while keeping original for output
+    if "from_email" in df.columns:
+        df["from_email_normalized"] = df["from_email"].astype(str).str.strip().str.lower()
+
     rename_map = {
         "email_warmup_details.status": "warmup_status",
         "email_warmup_details.warmup_reputation": "warmup_reputation",
@@ -184,6 +188,53 @@ def flatten_email_accounts(accounts: list[dict]) -> pd.DataFrame:
     df = df[existing_pref + remaining]
 
     return df
+
+
+def normalize_email(value: str | None) -> str:
+    """Normalize email strings for reliable matching."""
+
+    if value is None:
+        return ""
+
+    normalized = str(value).strip().lower()
+    return normalized if "@" in normalized else ""
+
+
+def build_smartlead_match_table(api_df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    """Create an exploded Smartlead DataFrame keyed by all probable email fields."""
+
+    candidate_cols = [
+        col
+        for col in api_df.columns
+        if any(token in col.lower() for token in ["email", "username", "login"])
+    ]
+
+    if not candidate_cols:
+        return pd.DataFrame(), []
+
+    candidate_normalized = []
+    for col in candidate_cols:
+        series = api_df[col].apply(normalize_email)
+        series.name = col
+        candidate_normalized.append(series)
+
+    normalized_df = pd.concat(candidate_normalized, axis=1)
+    match_keys = normalized_df.apply(
+        lambda row: sorted({val for val in row if isinstance(val, str) and val}), axis=1
+    )
+
+    match_df = api_df.copy()
+    match_df["match_key"] = match_keys
+    match_df = match_df.explode("match_key")
+    match_df = match_df[match_df["match_key"].notna() & (match_df["match_key"] != "")]
+
+    subset_cols = ["match_key"]
+    if "id" in match_df.columns:
+        subset_cols.append("id")
+
+    match_df = match_df.drop_duplicates(subset=subset_cols)
+
+    return match_df, candidate_cols
 
 
 def show_sidebar_info(api_df: pd.DataFrame | None):
@@ -275,15 +326,40 @@ This tool:
 
             if st.button("Enrich and generate output CSV"):
                 with st.spinner("Matching emails and enriching CSV..."):
-                    merged_df = input_df.merge(
-                        api_df,
-                        left_on=email_col,
-                        right_on="from_email",
+                    working_input = input_df.copy()
+                    working_input["_normalized_email"] = working_input[email_col].apply(
+                        normalize_email
+                    )
+
+                    api_match_df, candidate_cols = build_smartlead_match_table(api_df)
+
+                    if api_match_df.empty:
+                        st.error(
+                            "No email-like fields were detected in Smartlead data; cannot match."
+                        )
+                        return
+
+                    st.caption(
+                        "Matching against Smartlead columns: "
+                        + ", ".join(sorted(candidate_cols))
+                    )
+
+                    merged_df = working_input.merge(
+                        api_match_df,
+                        left_on="_normalized_email",
+                        right_on="match_key",
                         how="left",
                         suffixes=("", "_smartlead"),
                     )
 
-                st.success("Enrichment complete")
+                merged_df = merged_df.drop(columns=["_normalized_email", "match_key"])
+
+                matches_found = merged_df["from_email"].notna().sum()
+                if matches_found:
+                    st.success(f"Enrichment complete — matched {matches_found:,} inbox(es)")
+                else:
+                    st.warning("Enrichment complete but no matching Smartlead inboxes were found.")
+
 
                 st.write("Preview of enriched data:")
                 st.dataframe(merged_df.head())
