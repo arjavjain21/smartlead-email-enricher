@@ -105,6 +105,10 @@ def flatten_email_accounts(accounts: list[dict]) -> pd.DataFrame:
 
     df = pd.json_normalize(accounts, sep=".")
 
+    # Normalize emails for matching while keeping original for output
+    if "from_email" in df.columns:
+        df["from_email_normalized"] = df["from_email"].astype(str).str.strip().str.lower()
+
     rename_map = {
         "email_warmup_details.status": "warmup_status",
         "email_warmup_details.warmup_reputation": "warmup_reputation",
@@ -275,15 +279,32 @@ This tool:
 
             if st.button("Enrich and generate output CSV"):
                 with st.spinner("Matching emails and enriching CSV..."):
-                    merged_df = input_df.merge(
-                        api_df,
-                        left_on=email_col,
-                        right_on="from_email",
+                    working_input = input_df.copy()
+                    working_input["_normalized_email"] = (
+                        working_input[email_col].astype(str).str.strip().str.lower()
+                    )
+
+                    api_df_for_merge = api_df.copy()
+                    api_df_for_merge["from_email_normalized"] = api_df_for_merge[
+                        "from_email"
+                    ].astype(str).str.strip().str.lower()
+
+                    merged_df = working_input.merge(
+                        api_df_for_merge,
+                        left_on="_normalized_email",
+                        right_on="from_email_normalized",
                         how="left",
                         suffixes=("", "_smartlead"),
                     )
 
-                st.success("Enrichment complete")
+                merged_df = merged_df.drop(columns=["_normalized_email", "from_email_normalized"])
+
+                matches_found = merged_df["from_email"].notna().sum()
+                if matches_found:
+                    st.success(f"Enrichment complete — matched {matches_found:,} inbox(es)")
+                else:
+                    st.warning("Enrichment complete but no matching Smartlead inboxes were found.")
+
 
                 st.write("Preview of enriched data:")
                 st.dataframe(merged_df.head())
