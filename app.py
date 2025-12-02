@@ -10,7 +10,7 @@ import streamlit as st
 st.set_page_config(page_title="Smartlead Email Account Enricher", layout="wide")
 
 SMARTLEAD_ENDPOINT = "https://server.smartlead.ai/api/email-account/get-total-email-accounts"
-APP_PASSWORD = "h-y-e-e-r-k-e-1-2-3"
+APP_PASSWORD = "hyperke123"
 
 
 def check_password() -> bool:
