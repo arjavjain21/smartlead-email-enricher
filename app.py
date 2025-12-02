@@ -36,6 +36,15 @@ def check_password() -> bool:
     return True
 
 
+def get_state_df(key: str) -> pd.DataFrame | None:
+    """Convenience accessor for DataFrames stored in session_state."""
+
+    df = st.session_state.get(key)
+    if isinstance(df, pd.DataFrame):
+        return df
+    return None
+
+
 def get_smartlead_bearer() -> str:
     """Read bearer token from Streamlit secrets."""
     try:
@@ -218,7 +227,14 @@ This tool:
         """
     )
 
-    api_df = None
+    if "api_df" not in st.session_state:
+        st.session_state["api_df"] = None
+    if "merged_result" not in st.session_state:
+        st.session_state["merged_result"] = None
+    if "matches_found" not in st.session_state:
+        st.session_state["matches_found"] = 0
+
+    api_df = get_state_df("api_df")
 
     st.markdown("### Step 1: Upload your CSV of inboxes")
 
@@ -262,6 +278,7 @@ This tool:
                 st.warning("Smartlead API returned no email accounts")
                 return
 
+            st.session_state["api_df"] = api_df
             st.success(f"Fetched and cached {len(api_df):,} Smartlead email accounts")
             st.write("Preview of Smartlead data:")
             st.dataframe(api_df.head())
@@ -269,6 +286,7 @@ This tool:
         if api_df is None:
             try:
                 api_df = fetch_all_email_accounts()
+                st.session_state["api_df"] = api_df
             except Exception:
                 api_df = None
 
@@ -300,23 +318,31 @@ This tool:
                 merged_df = merged_df.drop(columns=["_normalized_email", "from_email_normalized"])
 
                 matches_found = merged_df["from_email"].notna().sum()
-                if matches_found:
-                    st.success(f"Enrichment complete — matched {matches_found:,} inbox(es)")
-                else:
-                    st.warning("Enrichment complete but no matching Smartlead inboxes were found.")
+                st.session_state["merged_result"] = merged_df
+                st.session_state["matches_found"] = matches_found
 
+        merged_result = get_state_df("merged_result")
+        matches_found = st.session_state.get("matches_found", 0)
 
-                st.write("Preview of enriched data:")
-                st.dataframe(merged_df.head())
-
-                csv_bytes = merged_df.to_csv(index=False).encode("utf-8-sig")
-
-                st.download_button(
-                    label="Download enriched CSV",
-                    data=csv_bytes,
-                    file_name="enriched_smartlead_accounts.csv",
-                    mime="text/csv",
+        if merged_result is not None:
+            if matches_found:
+                st.success(f"Enrichment complete — matched {matches_found:,} inbox(es)")
+            else:
+                st.warning(
+                    "Enrichment complete but no matching Smartlead inboxes were found."
                 )
+
+            st.write("Preview of enriched data:")
+            st.dataframe(merged_result.head())
+
+            csv_bytes = merged_result.to_csv(index=False).encode("utf-8-sig")
+
+            st.download_button(
+                label="Download enriched CSV",
+                data=csv_bytes,
+                file_name="enriched_smartlead_accounts.csv",
+                mime="text/csv",
+            )
     else:
         show_sidebar_info(api_df)
         st.info("Upload a CSV to get started")
