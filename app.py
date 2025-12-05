@@ -117,6 +117,7 @@ def flatten_email_accounts(accounts: list[dict]) -> pd.DataFrame:
     # Normalize emails for matching while keeping original for output
     if "from_email" in df.columns:
         df["from_email_normalized"] = df["from_email"].astype(str).str.strip().str.lower()
+        df["domain_normalized"] = df["from_email"].astype(str).str.split("@").str[-1].str.strip().str.lower()
 
     rename_map = {
         "email_warmup_details.status": "warmup_status",
@@ -150,6 +151,21 @@ def flatten_email_accounts(accounts: list[dict]) -> pd.DataFrame:
         df["tag_names"] = df["email_account_tag_mappings"].apply(lambda x: extract_tag_field(x, "name"))
         df["tag_ids"] = df["email_account_tag_mappings"].apply(lambda x: extract_tag_field(x, "id"))
         df["tag_colors"] = df["email_account_tag_mappings"].apply(lambda x: extract_tag_field(x, "color"))
+        df["vendor_tags"] = df["email_account_tag_mappings"].apply(
+            lambda tags: ", ".join(
+                sorted(
+                    {
+                        tag.get("tag", {}).get("name")
+                        for tag in tags
+                        if isinstance(tag, dict)
+                        and isinstance(tag.get("tag"), dict)
+                        and str(tag.get("tag", {}).get("name", "")).startswith("00")
+                    }
+                )
+            )
+            if isinstance(tags, list)
+            else ""
+        )
 
         df = df.drop(columns=["email_account_tag_mappings"])
 
@@ -189,6 +205,7 @@ def flatten_email_accounts(accounts: list[dict]) -> pd.DataFrame:
         "tag_names",
         "tag_ids",
         "tag_colors",
+        "vendor_tags",
         "dns_validation_status_json",
     ]
     existing_pref = [c for c in preferred_order if c in df.columns]
@@ -220,9 +237,9 @@ def main():
     st.markdown(
         """
 This tool:
-1. Fetches all email accounts from Smartlead via the API and caches them for this session  
-2. Lets you upload a CSV of inboxes  
-3. Matches your emails against Smartlead accounts  
+1. Fetches all email accounts from Smartlead via the API and caches them for this session
+2. Lets you upload a CSV of inboxes
+3. Matches your emails or domains against Smartlead accounts
 4. Outputs an enriched CSV with all Smartlead fields added
         """
     )
@@ -254,9 +271,9 @@ This tool:
         st.write("Preview of uploaded data:")
         st.dataframe(input_df.head())
 
-        st.markdown("### Step 2: Select the email column in your CSV")
+        st.markdown("### Step 2: Select the email or domain column in your CSV")
         email_col = st.selectbox(
-            "Column that contains inbox email addresses",
+            "Column that contains inbox email addresses or domains",
             options=list(input_df.columns),
         )
 
@@ -296,18 +313,32 @@ This tool:
             st.markdown("### Step 4: Enrich your CSV using Smartlead data")
 
             if st.button("Enrich and generate output CSV"):
-                with st.spinner("Matching emails and enriching CSV..."):
+                with st.spinner("Matching emails/domains and enriching CSV..."):
                     working_input = input_df.copy()
+
+                    def extract_domain(value: str) -> str:
+                        value = str(value).strip().lower()
+                        if "@" in value:
+                            return value.split("@", 1)[1]
+                        return value
+
                     working_input["_normalized_email"] = (
                         working_input[email_col].astype(str).str.strip().str.lower()
+                    )
+                    working_input["_normalized_domain"] = working_input[email_col].apply(
+                        extract_domain
                     )
 
                     api_df_for_merge = api_df.copy()
                     api_df_for_merge["from_email_normalized"] = api_df_for_merge[
                         "from_email"
                     ].astype(str).str.strip().str.lower()
+                    if "domain_normalized" not in api_df_for_merge:
+                        api_df_for_merge["domain_normalized"] = api_df_for_merge[
+                            "from_email"
+                        ].astype(str).str.split("@").str[-1].str.strip().str.lower()
 
-                    merged_df = working_input.merge(
+                    email_merged = working_input.merge(
                         api_df_for_merge,
                         left_on="_normalized_email",
                         right_on="from_email_normalized",
@@ -315,7 +346,37 @@ This tool:
                         suffixes=("", "_smartlead"),
                     )
 
-                merged_df = merged_df.drop(columns=["_normalized_email", "from_email_normalized"])
+                    unmatched_mask = email_merged["from_email"].isna() & email_merged[
+                        "_normalized_domain"
+                    ].notna()
+
+                    unmatched_inputs = working_input.loc[unmatched_mask]
+
+                    domain_merged = unmatched_inputs.merge(
+                        api_df_for_merge,
+                        left_on="_normalized_domain",
+                        right_on="domain_normalized",
+                        how="left",
+                        suffixes=("", "_smartlead"),
+                    )
+
+                    merged_df = pd.concat(
+                        [email_merged.loc[~unmatched_mask], domain_merged],
+                        ignore_index=True,
+                    )
+
+                merged_df = merged_df.drop(
+                    columns=[
+                        col
+                        for col in [
+                            "_normalized_email",
+                            "_normalized_domain",
+                            "from_email_normalized",
+                            "domain_normalized",
+                        ]
+                        if col in merged_df.columns
+                    ]
+                )
 
                 matches_found = merged_df["from_email"].notna().sum()
                 st.session_state["merged_result"] = merged_df
